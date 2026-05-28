@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Training artefacts (large, not for source control)
+checkpoints/
+games/
+runs/
+logs/
+*.pt
+*.pth
+*.npz
+*.log
+
+# Playwright
+.playwright/
+playwright-report/
+test-results/
