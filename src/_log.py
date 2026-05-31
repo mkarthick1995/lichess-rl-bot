@@ -25,6 +25,17 @@ def setup_logging(name: str = "run", level: str = "INFO",
 
     fmt = logging.Formatter(_FMT, datefmt=_DATEFMT)
 
+    # On Windows the console defaults to cp1252, which raises UnicodeEncodeError
+    # on log lines containing box-drawing / arrow / check symbols. Force UTF-8
+    # (with replacement) so console output never crashes the logger.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     root.addHandler(sh)
