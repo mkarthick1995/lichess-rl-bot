@@ -50,6 +50,23 @@ Run the full loop (resumable — reloads `checkpoints/best.pt` on restart):
 .\.venv\Scripts\python.exe -m src.loop --iterations 100 --games-per-iter 25 --train-steps 400 --eval-games 20
 ```
 
+For an unattended multi-day run, launch under the supervisor instead — it
+auto-restarts the loop if the process dies (the loop is resumable, so it simply
+continues from `best.pt` and the existing games buffer):
+
+```powershell
+Start-Process powershell -ArgumentList "-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",".\run_training.ps1"
+```
+
+Stop it by creating `logs\STOP` (the supervisor exits between restarts) and
+`Stop-Process` the python child. Restarts are recorded in `logs\supervisor.log`.
+
+Check progress at any time:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.status
+```
+
 Tunable knobs (defaults in parentheses): `--gen-sims` (100) and `--eval-sims`
 (100) MCTS simulations per move, `--batch-size` (256), `--channels` (128),
 `--blocks` (10), `--promote-threshold` (0.55). On 8 GB VRAM the defaults fit;

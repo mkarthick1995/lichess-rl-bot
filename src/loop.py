@@ -16,9 +16,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import faulthandler
 import logging
 import time
 from pathlib import Path
+
+# Dump a native traceback on hard faults (segfault, CUDA abort) so a silent
+# process death leaves evidence in stderr.
+faulthandler.enable()
 
 import numpy as np
 import torch
@@ -175,37 +180,58 @@ def main():
     log.info(f"replay buffer at {args.buffer} ({buffer.n_games()} games)")
 
     promotions = 0
-    for it in range(1, args.iterations + 1):
+    it = 1
+    while it <= args.iterations:
         t_it = time.monotonic()
         log.info(f"════════ iteration {it}/{args.iterations} ════════")
 
-        _generation_phase(best, device, buffer,
-                           args.games_per_iter, args.gen_sims, it)
+        try:
+            _generation_phase(best, device, buffer,
+                               args.games_per_iter, args.gen_sims, it)
 
-        candidate = _build_net(args.channels, args.blocks, device)
-        candidate.load_state_dict(copy.deepcopy(best.state_dict()))
-        _train_phase(candidate, device, buffer,
-                     args.train_steps, args.batch_size, args.lr,
-                     args.weight_decay, args.log_every, it)
-        torch.save(candidate.state_dict(), latest_path)
+            candidate = _build_net(args.channels, args.blocks, device)
+            candidate.load_state_dict(copy.deepcopy(best.state_dict()))
+            _train_phase(candidate, device, buffer,
+                         args.train_steps, args.batch_size, args.lr,
+                         args.weight_decay, args.log_every, it)
+            torch.save(candidate.state_dict(), latest_path)
 
-        win_rate = _eval_phase(candidate, best, device,
-                               args.eval_games, args.eval_sims, it)
+            win_rate = _eval_phase(candidate, best, device,
+                                   args.eval_games, args.eval_sims, it)
 
-        if win_rate >= args.promote_threshold:
-            best.load_state_dict(copy.deepcopy(candidate.state_dict()))
-            torch.save(best.state_dict(), best_path)
-            promotions += 1
-            log.info(f"[it {it}] ✓ PROMOTED candidate to best "
-                     f"(win_rate {win_rate:.3f} ≥ {args.promote_threshold})  "
-                     f"total promotions={promotions}")
-        else:
-            log.info(f"[it {it}] ✗ candidate rejected "
-                     f"(win_rate {win_rate:.3f} < {args.promote_threshold}); keeping best")
+            if win_rate >= args.promote_threshold:
+                best.load_state_dict(copy.deepcopy(candidate.state_dict()))
+                torch.save(best.state_dict(), best_path)
+                promotions += 1
+                log.info(f"[it {it}] ✓ PROMOTED candidate to best "
+                         f"(win_rate {win_rate:.3f} ≥ {args.promote_threshold})  "
+                         f"total promotions={promotions}")
+            else:
+                log.info(f"[it {it}] ✗ candidate rejected "
+                         f"(win_rate {win_rate:.3f} < {args.promote_threshold}); keeping best")
 
-        log.info(f"[it {it}] iteration took {time.monotonic()-t_it:.1f}s")
+            log.info(f"[it {it}] iteration took {time.monotonic()-t_it:.1f}s")
 
-    log.info(f"loop finished: {args.iterations} iterations, {promotions} promotions")
+        except KeyboardInterrupt:
+            log.warning("interrupted by user; exiting cleanly")
+            break
+        except Exception:
+            # A soft error (bad batch, transient CUDA error, etc.) must not kill
+            # a multi-day run. Log the traceback, free the GPU cache, and retry
+            # the same iteration. Generated games are already banked in the
+            # buffer, so no self-play work is lost.
+            log.exception(f"[it {it}] iteration failed; recovering and retrying")
+            try:
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            time.sleep(5)
+            continue
+
+        it += 1
+
+    log.info(f"loop finished: {it - 1} iterations completed, {promotions} promotions")
 
 
 if __name__ == "__main__":
