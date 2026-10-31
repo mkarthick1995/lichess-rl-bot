@@ -37,3 +37,7 @@ logs/
 .playwright/
 playwright-report/
 test-results/
+
+# Archived runs and local tools (Stockfish binary for evaluation)
+archive/
+tools/

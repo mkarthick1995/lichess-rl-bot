@@ -44,36 +44,72 @@ def _flip_square(sq: int) -> int:
     return chess.square(chess.square_file(sq), 7 - chess.square_rank(sq))
 
 
+HALFMOVE_PLANE = 17
+
+
+def is_repetition(board: chess.Board, count: int) -> bool:
+    """Same result as board.is_repetition(count), but only scans positions
+    since the last capture / pawn move (nothing earlier can repeat) and only
+    those with the same side to move. python-chess scans the whole game
+    stack on every call, which dominates MCTS time in long games."""
+    hm = board.halfmove_clock
+    if hm < 4:
+        return False
+    stack = board._stack
+    occ = board.occupied
+    seen = 1
+    for i in range(len(stack) - 2, max(len(stack) - hm - 1, -1), -2):
+        if stack[i].occupied == occ:
+            seen += 1
+            if seen >= count:
+                return board.is_repetition(count)     # confirm with the full check
+    return False
+
+
+def encode_board_u8(board: chess.Board) -> np.ndarray:
+    """Encode `board` as a compact (N_PLANES, 8, 8) uint8 array from STM's POV.
+
+    Identical to encode_board except plane 17 holds the raw halfmove clock
+    (capped at 100) instead of clock/100 — see planes_to_float. Built from
+    bitboards, ~10x faster than a per-square loop; this sits on the MCTS hot
+    path (one call per leaf evaluation)."""
+    us = board.turn
+    own, opp = board.occupied_co[us], board.occupied_co[not us]
+    bbs = (board.pawns, board.knights, board.bishops,
+           board.rooks, board.queens, board.kings)
+    bits = np.unpackbits(
+        np.array([bb & own for bb in bbs] + [bb & opp for bb in bbs],
+                 dtype=np.uint64).view(np.uint8),
+        bitorder="little").reshape(12, 8, 8)            # [plane, rank, file]
+    if us == chess.BLACK:
+        bits = bits[:, ::-1, :]
+
+    planes = np.empty((N_PLANES, 8, 8), dtype=np.uint8)
+    planes[:12] = bits
+    planes[12] = 1                                      # side-to-move (always us)
+    planes[13] = board.has_kingside_castling_rights(us)
+    planes[14] = board.has_queenside_castling_rights(us)
+    planes[15] = board.has_kingside_castling_rights(not us)
+    planes[16] = board.has_queenside_castling_rights(not us)
+    planes[17] = min(board.halfmove_clock, 100)
+    planes[18] = is_repetition(board, 2)
+    return planes
+
+
+def planes_to_float(planes):
+    """uint8 planes from encode_board_u8 (numpy or torch, batched (B,19,8,8)
+    or single) → float32 network input matching encode_board."""
+    if isinstance(planes, np.ndarray):
+        x = planes.astype(np.float32)
+    else:
+        x = planes.float()
+    x[..., HALFMOVE_PLANE, :, :] /= 100.0
+    return x
+
+
 def encode_board(board: chess.Board) -> np.ndarray:
     """Encode `board` as a (N_PLANES, 8, 8) float32 tensor from STM's POV."""
-    us = board.turn
-    them = not us
-    flip = us == chess.BLACK
-
-    planes = np.zeros((N_PLANES, 8, 8), dtype=np.float32)
-
-    own_offset, opp_offset = 0, 6
-    for sq in chess.SQUARES:
-        piece = board.piece_at(sq)
-        if piece is None:
-            continue
-        idx = PIECE_TYPES.index(piece.piece_type)
-        plane = (own_offset if piece.color == us else opp_offset) + idx
-        s = _flip_square(sq) if flip else sq
-        planes[plane, chess.square_rank(s), chess.square_file(s)] = 1.0
-
-    # Plane 12: side-to-move (always 1.0 because we flip).
-    planes[12, :, :] = 1.0
-
-    if board.has_kingside_castling_rights(us):    planes[13, :, :] = 1.0
-    if board.has_queenside_castling_rights(us):   planes[14, :, :] = 1.0
-    if board.has_kingside_castling_rights(them):  planes[15, :, :] = 1.0
-    if board.has_queenside_castling_rights(them): planes[16, :, :] = 1.0
-
-    planes[17, :, :] = min(board.halfmove_clock / 100.0, 1.0)
-    planes[18, :, :] = 1.0 if board.is_repetition(2) else 0.0
-
-    return planes
+    return planes_to_float(encode_board_u8(board))
 
 
 def move_to_index(move: chess.Move, board: chess.Board) -> int:
@@ -158,3 +194,45 @@ def legal_move_mask(board: chess.Board) -> np.ndarray:
         except ValueError:
             pass
     return mask
+
+
+# ---------------------------------------------------------------------------
+# Fast move → index lookup (MCTS hot path). Tables are keyed in the STM frame,
+# i.e. after flipping squares for black, so one table serves both colours.
+
+def _build_move_tables() -> tuple[list[int], list[int]]:
+    white = chess.Board()                 # move_to_index only reads board.turn
+    plain = [-1] * (64 * 64)              # queen-like / knight / queen-promo
+    under = [-1] * (64 * 64 * 3)          # underpromotion to N/B/R
+    for f in range(64):
+        for t in range(64):
+            if f == t:
+                continue
+            try:
+                plain[f * 64 + t] = move_to_index(chess.Move(f, t), white)
+            except ValueError:
+                pass
+            if chess.square_rank(f) == 6 and chess.square_rank(t) == 7:
+                for k, piece in enumerate(UP_PIECES):
+                    try:
+                        under[(f * 64 + t) * 3 + k] = move_to_index(
+                            chess.Move(f, t, promotion=piece), white)
+                    except ValueError:
+                        pass
+    return plain, under
+
+
+_PLAIN_IDX, _UNDER_IDX = _build_move_tables()
+
+
+def legal_moves_and_indices(board: chess.Board) -> tuple[list[chess.Move], np.ndarray]:
+    """All legal moves of `board` and their policy indices (int64 array)."""
+    flip = 56 if board.turn == chess.BLACK else 0
+    moves = list(board.legal_moves)
+    plain, under = _PLAIN_IDX, _UNDER_IDX
+    idx = []
+    for m in moves:
+        k = (m.from_square ^ flip) * 64 + (m.to_square ^ flip)
+        p = m.promotion
+        idx.append(under[k * 3 + p - 2] if p and p != chess.QUEEN else plain[k])
+    return moves, np.array(idx, dtype=np.int64)

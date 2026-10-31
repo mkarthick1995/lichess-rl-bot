@@ -1,11 +1,11 @@
-"""Print a one-shot training dashboard: process state, buffer, checkpoints,
-recent losses, promotions, and supervisor restarts.
+"""Print a one-shot training dashboard: liveness, counters, throughput,
+recent arena / Stockfish results, and supervisor restarts.
 
     python -m src.status
 """
 from __future__ import annotations
 
-import re
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -33,72 +33,71 @@ def _fmt_age(ts: float) -> str:
 
 def main():
     root = Path(".")
-    logs = root / "logs"
-    print("========== training status ==========")
+    logs, ckpt = root / "logs", root / "checkpoints"
+    print("================ training status ================")
 
-    # Process liveness — is anything writing the loop log recently?
     loop_log = _latest("loop-*.log", logs) if logs.exists() else None
     if loop_log:
         age = datetime.now().timestamp() - loop_log.stat().st_mtime
-        alive = "LIKELY RUNNING" if age < 600 else "STALE / STOPPED"
-        print(f"loop log:        {loop_log.name}  (updated {_fmt_age(loop_log.stat().st_mtime)})  → {alive}")
+        alive = "RUNNING" if age < 600 else "STALE / STOPPED"
+        print(f"loop log:     {loop_log.name}  (updated {_fmt_age(loop_log.stat().st_mtime)})  → {alive}")
     else:
-        print("loop log:        none found — has training started?")
+        print("loop log:     none found — has training started?")
+    if (logs / "STOP").exists():
+        print("              logs/STOP present — training will stop / not restart")
 
-    # Replay buffer.
-    games_dir = root / "games"
-    n_games = len(list(games_dir.glob("*.npz"))) if games_dir.exists() else 0
-    print(f"replay buffer:   {n_games} games")
+    state_p = ckpt / "state.json"
+    if state_p.exists():
+        s = json.loads(state_p.read_text())
+        print("-------------------------------------------------")
+        print(f"run started:  {s.get('created')}")
+        print(f"best net:     v{s['version']}  ({s['promotions']} promotions)")
+        print(f"train steps:  {s['step']}")
+        print(f"self-play:    {s['games']} games, {s['positions']} positions")
+        print(f"stockfish:    next check at skill level {s['sf_level']}")
+    else:
+        print("no checkpoints/state.json yet")
 
-    # Checkpoints.
-    for name in ("best.pt", "latest.pt"):
-        p = root / "checkpoints" / name
-        if p.exists():
-            mb = p.stat().st_size / 1e6
-            print(f"checkpoint:      {name}  {mb:.1f}MB  (updated {_fmt_age(p.stat().st_mtime)})")
-        else:
-            print(f"checkpoint:      {name}  — not yet written")
-
-    # Parse the loop log for progress signals.
     if loop_log:
-        text = loop_log.read_text(encoding="utf-8", errors="replace").splitlines()
-        cur_iter = None
-        last_loss = None
-        last_eval = None
-        promotions = 0
-        for line in text:
-            m = re.search(r"iteration (\d+)/(\d+)", line)
-            if m:
-                cur_iter = (int(m.group(1)), int(m.group(2)))
-            m = re.search(r"training done: loss [\d.]+ . ([\d.]+)", line)
-            if m:
-                last_loss = float(m.group(1))
-            m = re.search(r"eval:.*win_rate=([\d.]+)", line)
-            if m:
-                last_eval = float(m.group(1))
-            if "PROMOTED" in line:
-                promotions += 1
-        print("--------------------------------------")
-        if cur_iter:
-            print(f"current iter:    {cur_iter[0]} / {cur_iter[1]}")
-        if last_loss is not None:
-            print(f"last train loss: {last_loss:.3f}")
-        if last_eval is not None:
-            print(f"last eval wr:    {last_eval:.3f}")
-        print(f"promotions:      {promotions}")
+        stats = [l for l in loop_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if "[stats]" in l]
+        if stats:
+            print("-------------------------------------------------")
+            print("last progress line:")
+            line = stats[-1].split("[stats] ", 1)[1]
+            for part in line.split(" | "):
+                print(f"  {part}")
 
-    # Supervisor restart history.
-    sup = logs / "supervisor.log" if logs.exists() else None
-    if sup and sup.exists():
+    hist_p = ckpt / "history.jsonl"
+    if hist_p.exists():
+        events = [json.loads(l) for l in hist_p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        matches = [e for e in events if e["kind"] == "match"]
+        sf = [e for e in events if e["kind"] == "stockfish"]
+        if matches:
+            print("-------------------------------------------------")
+            print(f"arena: {len(matches)} evaluations, last 5:")
+            for e in matches[-5:]:
+                w, d, l = e["wdl"]
+                print(f"  {e['time']}  step {e['step']:>7} vs v{e['best']:<4} "
+                      f"{w}W-{d}D-{l}L  {e['score']:.2f}  {'PROMOTED' if e['promoted'] else ''}")
+        if sf:
+            print("-------------------------------------------------")
+            print("vs local Stockfish (skill level, 50ms/move):")
+            for e in sf[-8:]:
+                w, d, l = e["wdl"]
+                print(f"  {e['time']}  best v{e['best']:<4} skill {e['level']:>2}: "
+                      f"{w}W-{d}D-{l}L  score {e['score']:.2f}")
+
+    sup = logs / "supervisor.log"
+    if sup.exists():
         lines = sup.read_text(encoding="utf-8", errors="replace").splitlines()
         starts = sum(1 for l in lines if "starting training" in l)
         deaths = sum(1 for l in lines if "died" in l)
-        print("--------------------------------------")
-        print(f"supervisor:      {starts} starts, {deaths} restarts after death")
+        print("-------------------------------------------------")
+        print(f"supervisor:   {starts} starts, {deaths} restarts after death")
         if lines:
             print(f"  last: {lines[-1]}")
-
-    print("======================================")
+    print("=================================================")
 
 
 if __name__ == "__main__":
