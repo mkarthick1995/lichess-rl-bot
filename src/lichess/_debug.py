@@ -30,30 +30,26 @@ async def save_screenshot(page, tag: str = "error") -> Path | None:
 
 
 async def dump_lichess_state(page) -> dict | None:
-    """Return a summary of window.lichess.round.data — what the page knows."""
+    """Summarise the page-init-data JSON + body playing-state — what the page
+    knows at load. Useful when a parse looks wrong."""
     try:
         snap = await page.evaluate(
             """() => {
                 try {
-                    var r = window.lichess && window.lichess.round;
-                    if (!r || !r.data) return { ok: false, reason: 'no window.lichess.round.data' };
-                    var d = r.data;
-                    return {
-                        ok: true,
-                        game: d.game ? {
-                            id: d.game.id,
-                            status: d.game.status,
-                            turns: d.game.turns,
-                            initialFen: d.game.initialFen || null,
-                            fen: d.game.fen || null,
-                            speed: d.game.speed,
-                            variant: d.game.variant && d.game.variant.key
-                        } : null,
-                        player: d.player ? { color: d.player.color, user: d.player.user && d.player.user.username } : null,
-                        opponent: d.opponent ? { color: d.opponent.color, user: d.opponent.user && d.opponent.user.username, ai: d.opponent.ai } : null,
-                        n_steps: d.steps ? d.steps.length : null,
-                        last_uci: d.steps && d.steps.length > 1 ? d.steps[d.steps.length - 1].uci : null
-                    };
+                    var out = { playing: document.body.classList.contains('playing') };
+                    var el = document.getElementById('page-init-data');
+                    if (!el) { out.ok = false; out.reason = 'no #page-init-data'; return out; }
+                    var d = JSON.parse(el.textContent).data;
+                    out.ok = true;
+                    out.game = d.game ? {
+                        id: d.game.id, status: d.game.status, turns: d.game.turns,
+                        fen: d.game.fen || null, speed: d.game.speed,
+                        variant: d.game.variant && d.game.variant.key
+                    } : null;
+                    out.player = d.player ? { color: d.player.color } : null;
+                    out.opponent = d.opponent ? { color: d.opponent.color, ai: d.opponent.ai } : null;
+                    out.n_steps = d.steps ? d.steps.length : null;
+                    return out;
                 } catch(e) { return { ok: false, error: String(e) }; }
             }"""
         )

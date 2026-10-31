@@ -40,11 +40,11 @@ def _castling_rook_square(move: chess.Move) -> chess.Square:
     return chess.square(rook_file, rank)
 
 
-async def execute_move(page: Page, move: chess.Move) -> bool:
-    """Click the from-square then the to-square (rook-square for castling).
+async def execute_move(page: Page, move: chess.Move, board: chess.Board | None = None) -> bool:
+    """Drag the piece from its square to the target (the rook square for castling).
 
-    Returns True if the click pair was issued without raising; doesn't verify
-    that Lichess accepted the move — the next parse_board call confirms that.
+    Returns True if the drag was issued without raising; the caller confirms
+    that Lichess accepted the move (play._sync_after_our_move).
     """
     uci = move.uci()
     try:
@@ -55,23 +55,33 @@ async def execute_move(page: Page, move: chess.Move) -> bool:
 
         fx, fy = _square_center(move.from_square, rect, sq, orientation)
 
-        is_castling = (
-            abs(chess.square_file(move.to_square) - chess.square_file(move.from_square)) == 2
-            and move.from_square in (chess.E1, chess.E8)
-        )
+        if board is not None:
+            is_castling = board.is_castling(move)
+        else:   # heuristic without a board: a king-like two-file hop along the back rank
+            is_castling = (
+                abs(chess.square_file(move.to_square) - chess.square_file(move.from_square)) == 2
+                and move.from_square in (chess.E1, chess.E8)
+                and chess.square_rank(move.to_square) == chess.square_rank(move.from_square)
+            )
         target_square = _castling_rook_square(move) if is_castling else move.to_square
         tx, ty = _square_center(target_square, rect, sq, orientation)
 
         from_name = chess.square_name(move.from_square)
         to_name   = chess.square_name(move.to_square)
         tgt_name  = chess.square_name(target_square)
-        log.info(f"clicking {from_name} → {tgt_name}"
+        log.info(f"dragging {from_name} → {tgt_name}"
                  f"{' (castle: clicking rook)' if is_castling else ''}"
                  f"  uci={uci}  from=({fx:.0f},{fy:.0f})  to=({tx:.0f},{ty:.0f})")
 
-        await page.mouse.click(fx, fy)
-        await asyncio.sleep(0.08)
-        await page.mouse.click(tx, ty)
+        # Drag rather than click-click: a click pair toggles chessground's
+        # selection, so one stray click (e.g. during the opponent's
+        # animation) leaves a piece selected and every later pair misfires.
+        # A drag moves the piece regardless of the current selection.
+        await page.mouse.move(fx, fy)
+        await page.mouse.down()
+        await page.mouse.move((fx + tx) / 2, (fy + ty) / 2, steps=4)
+        await page.mouse.move(tx, ty, steps=4)
+        await page.mouse.up()
         await asyncio.sleep(0.08)
 
         if move.promotion:
@@ -89,14 +99,25 @@ async def _handle_promotion(page: Page, piece: int):
              chess.BISHOP: "bishop", chess.KNIGHT: "knight"}
     name = names.get(piece, "queen")
     log.info(f"promotion dialog: selecting {name}")
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.2)
+
+    # Strategy 0 — Lichess's picker: <div id="promotion-choice"> holding
+    # <square><piece class="queen white"></square> per option.
+    try:
+        sel = f"#promotion-choice piece.{name}"
+        await page.wait_for_selector(sel, timeout=500)
+        await page.click(sel, timeout=500)
+        log.info(f"promotion: clicked {sel}")
+        return
+    except Exception as e:
+        log.debug(f"promotion #promotion-choice strategy failed: {e}")
 
     # Strategy 1 — JS scan inside promotion-choice container.
     try:
         clicked = await page.evaluate(
             f"""() => {{
                 var containers = document.querySelectorAll(
-                    '.promotion-choice, promotion-choice, .promotion, .cg-wrap .promotion-choice'
+                    '#promotion-choice, .promotion-choice, promotion-choice, .promotion'
                 );
                 for (var c = 0; c < containers.length; c++) {{
                     var els = containers[c].querySelectorAll('*');
@@ -107,7 +128,6 @@ async def _handle_promotion(page: Page, piece: int):
                             return 'found:{name}';
                         }}
                     }}
-                    if (els.length > 0) {{ els[0].click(); return 'fallback-first'; }}
                 }}
                 return null;
             }}"""
@@ -125,8 +145,6 @@ async def _handle_promotion(page: Page, piece: int):
         f".promotion-choice .{name}",
         f".promotion piece.{name}",
         f"promotion-choice .{name}",
-        ".promotion-choice square:first-child",
-        ".promotion-choice > *:first-child",
     ]
     for sel in selectors:
         try:
