@@ -11,17 +11,33 @@ self-play, that plays on Lichess via browser automation.
 
 - **Network** (`src/network.py`) — a ResNet trunk with a policy head (4672-move
   distribution) and a value head (scalar position evaluation).
-- **Search** (`src/mcts.py`) — PUCT Monte-Carlo Tree Search guided by the
-  network; the value head replaces hand-written evaluation.
-- **Self-play** (`src/self_play.py`) — the current network plays itself; each
-  position is stored with its MCTS visit distribution and the game outcome.
-- **Training** (`src/train.py`) — cross-entropy on the policy + MSE on the
-  value, sampled from a disk-backed replay buffer (`src/replay_buffer.py`).
-- **Orchestrator** (`src/loop.py`) — automates self-play → train → evaluate →
-  gate. A trained *candidate* only replaces the *best* network if it wins a
-  win-rate margin in the arena (`src/evaluate.py`).
+- **Search** (`src/mcts.py`, `src/inference.py`) — PUCT Monte-Carlo Tree Search
+  guided by the network. Leaves from many trees (or from one tree, via virtual
+  loss) are scored in one batched GPU call, with the policy gathered to the
+  legal moves on the GPU.
+- **Game generation** (`src/self_play.py`) — `GameRunner` plays ~150 games at
+  once per process so the GPU sees large batches. Each recorded position keeps
+  its MCTS visit distribution and the final game result.
+- **Replay buffer** (`src/replay_buffer.py`) — the last 2M positions in RAM in a
+  compact form (uint8 planes and the top-96 sparse policy), persisted to
+  `games/` as chunk files that any process can add to.
+- **Orchestrator** (`src/loop.py`, `src/workers.py`) — 7 self-play worker
+  processes stream games with the current *best* net. The trainer trains a
+  *candidate* continuously, paced so each position is sampled about 4 times.
+  An arena worker plays 160-game matches of candidate snapshots against best
+  and promotes those that score ≥ 55%. Every 5 promotions, best is measured
+  against a local Stockfish skill ladder (`src/evaluate.py`).
 - **Lichess wiring** (`src/lichess/`) — Playwright reads the board from the DOM,
-  picks a move with MCTS + the trained net, and clicks it. Heavily logged.
+  picks a move with MCTS + the trained net, and clicks it. If the page and the
+  tracked game ever disagree, the bot resyncs from the server's move list.
+- **Stockfish farm** (`src/lichess/farm.py`) — starts and plays games in a row
+  against Lichess's "Play with the computer" Stockfish levels, ramping the
+  level by recent win rate. Each game is recorded into `games/`, and the
+  trainer picks it up automatically.
+
+Throughput on a Ryzen 7 5800X + RTX 3070 Ti: ~22k network evaluations/s, i.e.
+~2–3k self-play games/hour at 100 simulations per move. That's about 100× the
+original one-position-at-a-time search.
 
 ## Setup (Windows, RTX 3070 Ti)
 
@@ -44,57 +60,93 @@ Verify CUDA is picked up:
 
 ## Training
 
-Run the full loop (resumable — reloads `checkpoints/best.pt` on restart):
+Training runs under a supervisor that restarts it if it dies. The loop resumes
+on its own from `checkpoints/state.json`, `checkpoints/latest.pt` and `games/`:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.loop --iterations 100 --games-per-iter 25 --train-steps 400 --eval-games 20
+Start-Process powershell -ArgumentList "-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",".
+un_training.ps1"
 ```
 
-For an unattended multi-day run, launch under the supervisor instead — it
-auto-restarts the loop if the process dies (the loop is resumable, so it simply
-continues from `best.pt` and the existing games buffer):
+A scheduled task, **"lichess-rl-bot training"**, starts the same script at
+logon, so training resumes after a reboot. Only one supervisor can run at a
+time (named mutex). While training runs, the loop keeps Windows from sleeping.
+
+- **Progress:** `.\.venv\Scripts\python.exe -m src.status` (counters,
+  throughput, arena results, Stockfish ladder, restarts). Full log:
+  `logs\loop-*.log`; every evaluation is also appended to
+  `checkpoints\history.jsonl`.
+- **Stop:** `New-Item logs\STOP`. The loop saves and exits within seconds,
+  the supervisor exits, and the logon task won't restart it while `logs\STOP`
+  exists. Run the script by hand to resume (that clears `STOP`).
+- **Remove the logon task:** `Unregister-ScheduledTask -TaskName "lichess-rl-bot training"`.
+
+Outputs: `checkpointsest.pt` is always the newest promoted net (what the
+Lichess tools use). `checkpoints\genest_NNNNN.pt` keeps the promotion
+history: the last 10, plus every 10th.
+
+Tunable knobs (`python -m src.loop --help`): `--workers`/`--parallel` (CPU
+parallelism), `--gen-sims`/`--eval-sims`, `--sample-ratio`,
+`--buffer-capacity`, `--lr-schedule`, `--eval-games`/`--promote-threshold`,
+`--hours`.
+
+Standalone tools:
 
 ```powershell
-Start-Process powershell -ArgumentList "-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",".\run_training.ps1"
+python -m src.self_play --checkpoint checkpoints/best.pt --n-games 64     # generate games
+python -m src.train --steps 1000                                          # train on games/
+python -m src.evaluate --a checkpoints/best.pt --b checkpoints/gen/best_00010.pt
+python -m src.evaluate --a checkpoints/best.pt --stockfish-level 3        # vs local Stockfish
 ```
 
-Stop it by creating `logs\STOP` (the supervisor exits between restarts) and
-`Stop-Process` the python child. Restarts are recorded in `logs\supervisor.log`.
+`src.evaluate --stockfish-level` and the in-loop ladder use Stockfish 17.1 at
+`tools\stockfish\stockfish.exe` (official build, not in git; download
+`stockfish-windows-x86-64-avx2.zip` from the Stockfish GitHub releases and
+rename the exe).
 
-Check progress at any time:
+## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.status
+.\.venv\Scripts\python.exe -m pip install pytest
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Tunable knobs (defaults in parentheses): `--gen-sims` (100) and `--eval-sims`
-(100) MCTS simulations per move, `--batch-size` (256), `--channels` (128),
-`--blocks` (10), `--promote-threshold` (0.55). On 8 GB VRAM the defaults fit;
-lower `--batch-size` if you hit out-of-memory.
-
-Individual phases can also be run standalone: `python -m src.self_play`,
-`python -m src.train`, `python -m src.evaluate --a A.pt --b B.pt`.
+These cover encoding against a reference implementation, move indexing,
+repetition detection, the search (mate-in-1, visit/virtual-loss accounting),
+game records and value signs, and replay-buffer ring/reload/refresh.
 
 ## Playing on Lichess
 
+Play one game against Lichess's computer and watch (Chromium opens; add
+`--headless` to hide it):
+
 ```powershell
-.\.venv\Scripts\python.exe -m src.lichess.play --checkpoint checkpoints/best.pt --log-level DEBUG
+.\.venv\Scripts\python.exe -m src.lichess.play --level 3 --color random
 ```
 
-Chromium opens; navigate to a game (e.g. a challenge against the Stockfish
-bot), return to the terminal and press Enter. The bot then plays its turns.
+Or pass a game URL (`python -m src.lichess.play https://lichess.org/<id>`).
+With no arguments it opens lichess.org: start a game yourself, then press
+Enter in the terminal. `--n-simulations` (default 800) sets search depth per
+move; on the GPU, 800 simulations take about 0.4s.
+
+Fully automatic games against Lichess's Stockfish levels, recorded as
+training data:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.lichess.farm --checkpoint checkpoints/best.pt --n-games 20 --start-level 1 --headless
+```
 
 ## Logs
 
 Every entry point writes to stdout **and** a timestamped file under `logs/`.
 Use `--log-level DEBUG` for per-move MCTS detail (top candidates, value, timing)
 and, in the Lichess wiring, every selector / coordinate / click. On errors the
-wiring saves a screenshot to `logs/screenshots/` and dumps
-`window.lichess.round.data`.
+wiring saves a screenshot to `logs/screenshots/` and logs the game data from
+the page.
 
 ## Expectations
 
-With ~5M parameters on a single RTX 3070 Ti, realistic strength after a few
+With 3M parameters (128ch × 10 blocks) on a single RTX 3070 Ti, realistic strength after a few
 weeks of self-play is club level (~1500–1800 Lichess rapid). Surpassing strong
 Stockfish is not achievable at this scale — that's a compute limit, not a code
 one.
