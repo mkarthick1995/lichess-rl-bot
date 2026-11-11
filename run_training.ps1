@@ -31,7 +31,7 @@ $loopArgs = @(
     "--eval-sims", "100",
     "--batch-size", "512",
     "--sample-ratio", "4",
-    "--eval-games", "160",
+    "--eval-every", "3000", "--eval-games", "160",
     "--promote-threshold", "0.55",
     "--channels", "128",
     "--blocks", "10",
