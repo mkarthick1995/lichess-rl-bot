@@ -199,6 +199,7 @@ class BulletEngine:
         self._root_stack: list[chess.Move] = []   # move stack of _root's position
         self._ponder_thread: Optional[threading.Thread] = None
         self._ponder_stop = threading.Event()
+        self._last_clock: Optional[Clock] = None
 
     # -- tree reuse ---------------------------------------------------------
     def _reuse(self, board: chess.Board) -> Node:
@@ -245,6 +246,10 @@ class BulletEngine:
             return
         root = self._reuse(board_after)
         self._set_root(root, board_after)
+        c = self._last_clock
+        if c is not None and hasattr(self.evaluate, "set_clock"):
+            # the pondering root is the opponent's turn: their clock is "ours"
+            self.evaluate.set_clock(Clock(c.opp_ms, c.our_ms, c.opp_inc_ms, c.inc_ms))
         self._ponder_stop = threading.Event()
         self._ponder_thread = threading.Thread(
             target=self._ponder_loop, args=(root, board_after.copy()), daemon=True)
@@ -264,6 +269,9 @@ class BulletEngine:
             return MoveInfo(move=mate, mode="mate", think_ms=0,
                             spent_ms=(time.monotonic() - t0) * 1000.0, sims=0, value=1.0)
 
+        self._last_clock = clock
+        if hasattr(self.evaluate, "set_clock"):
+            self.evaluate.set_clock(clock)
         root = self._reuse(board)
         reused = root.visit_count
         our_moves = len(board.move_stack) // 2

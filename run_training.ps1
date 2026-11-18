@@ -26,21 +26,33 @@ $superLog  = Join-Path $PSScriptRoot "logs\supervisor.log"
 $stopFile  = Join-Path $PSScriptRoot "logs\STOP"
 New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "logs") | Out-Null
 
-$loopArgs = @(
-    "-m", "src.loop",
-    "--workers", "7",
-    "--parallel", "144",
-    "--gen-sims", "100",
-    "--eval-sims", "100",
-    "--batch-size", "512",
-    "--sample-ratio", "4",
-    "--eval-every", "6000", "--eval-games", "160",
-    "--promote-threshold", "0.55",
-    "--channels", "128",
-    "--blocks", "10",
-    "--device", "cuda",
-    "--log-level", "INFO"
-)
+# Jobs this supervisor can run. Each is resumable and exits with code 0 when
+# finished (leaving logs/STOP so logon launches don't rerun it). $job selects
+# the active one.
+$jobs = @{
+    # Generation 1: AlphaGo-Zero-style self-play, 128x10 ResNet. Stopped at
+    # 566k steps on 2026-11-18 in favour of generation 2.
+    "selfplay-v1" = @(
+        "-m", "src.loop",
+        "--workers", "7", "--parallel", "144",
+        "--gen-sims", "100", "--eval-sims", "100",
+        "--batch-size", "512", "--sample-ratio", "4",
+        "--eval-every", "6000", "--eval-games", "160",
+        "--max-steps", "630000",
+        "--promote-threshold", "0.55",
+        "--channels", "128", "--blocks", "10",
+        "--device", "cuda", "--log-level", "INFO"
+    )
+    # Generation 2, stage 1: supervised pre-training of the clock-aware
+    # 192x12 SE-ResNet (WDL + moves-left) on 2000+ rated Lichess bullet games.
+    "pretrain-v2" = @(
+        "-m", "src.pretrain",
+        "--epochs", "2", "--batch-size", "1024",
+        "--finish-stop"
+    )
+}
+$job = "pretrain-v2"
+$loopArgs = $jobs[$job]
 
 function Log-Super($msg) {
     $line = "{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -73,7 +85,7 @@ while ($true) {
         break
     }
     $attempt++
-    Log-Super "starting training (attempt $attempt)..."
+    Log-Super "starting job '$job' (attempt $attempt)..."
 
     # Start-Process (not `& $py ... 2>>`): in Windows PowerShell, piping a
     # native program's stderr turns each line into an error record, which with

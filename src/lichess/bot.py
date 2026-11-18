@@ -36,8 +36,7 @@ import torch
 
 from .._log import setup_logging
 from ..bullet import BulletConfig, BulletEngine, Clock
-from ..inference import BatchEvaluator
-from ..self_play import load_net
+from ..inference2 import make_evaluator
 from .bot_api import LichessAPI, load_token
 
 log = logging.getLogger("lichess.bot")
@@ -434,9 +433,8 @@ def main():
 
     torch.backends.cudnn.benchmark = True
     dev = torch.device(args.device)
-    net = load_net(args.checkpoint, args.channels, args.blocks, dev)
-    net.eval()
-    evaluator = BatchEvaluator(net, dev)
+    evaluator = make_evaluator(args.checkpoint, dev, args.channels, args.blocks)
+    log.info(f"network: {args.checkpoint} ({type(evaluator).__name__})")
     cfg = BulletConfig(overhead_ms=args.overhead_ms)
     make_engine = lambda: BulletEngine(evaluator, cfg)
     # warm up cuDNN so the first move isn't slow

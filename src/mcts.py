@@ -215,17 +215,23 @@ def search(root: Node, board: chess.Board, evaluate: Evaluator, n_simulations: i
     early; both are checked between batches, so it overruns by at most one
     network call. The root is always expanded, so a move is always available."""
     vl = 1.0 if leaf_batch > 1 else 0.0
+    # Evaluators that need each leaf's ply parity relative to the root (to
+    # orient clocks) declare `uses_parity`; others get the classic signature.
+    if getattr(evaluate, "uses_parity", False):
+        ev = evaluate
+    else:
+        ev = lambda planes, idx, parity=None: evaluate(planes, idx)
     if not root.expanded:
         p = gather_leaf(root, board, c_puct, fpu_reduction)
         if isinstance(p, Pending):
-            priors, values = evaluate([p.planes], [p.idx])
+            priors, values = ev([p.planes], [p.idx], [0])
             complete_leaf(p, priors[0], float(values[0]))
     if root.terminal is not None and root.terminal == 0.0 and any(board.legal_moves):
         # A draw is *claimable* here (threefold / 50-move) but nobody claimed
         # it — e.g. on Lichess the game simply continues — so we still need a
         # move. Expand the root normally; deeper nodes keep the draw rule.
         moves, idx = encoding.legal_moves_and_indices(board)
-        priors, values = evaluate([encoding.encode_board_u8(board)], [idx])
+        priors, values = ev([encoding.encode_board_u8(board)], [idx], [0])
         root.terminal, root.n, root.q_sum = None, 0, 0.0
         complete_leaf(Pending(root, [], None, moves, idx), priors[0], float(values[0]))
     if on_root_expanded is not None:
@@ -247,7 +253,8 @@ def search(root: Node, board: chess.Board, evaluate: Evaluator, n_simulations: i
             if isinstance(p, Pending):
                 batch.append(p)
         if batch:
-            priors, values = evaluate([p.planes for p in batch], [p.idx for p in batch])
+            priors, values = ev([p.planes for p in batch], [p.idx for p in batch],
+                                [len(p.path) % 2 for p in batch])
             for p, pr, v in zip(batch, priors, values):
                 complete_leaf(p, pr, float(v), vl)
     return root

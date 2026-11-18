@@ -44,3 +44,6 @@ tools/
 
 # Lichess API token (never commit)
 .lichess-token
+
+# Lichess database downloads and extracted training positions
+data/

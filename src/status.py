@@ -88,10 +88,26 @@ def main():
                 print(f"  {e['time']}  best v{e['best']:<4} skill {e['level']:>2}: "
                       f"{w}W-{d}D-{l}L  score {e['score']:.2f}")
 
+    pre_log = _latest("pretrain-*.log", logs) if logs.exists() else None
+    if pre_log:
+        text = pre_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        steps = [l for l in text if "  step " in l and "pos/s" in l]
+        vals = [l for l in text if "[val]" in l]
+        age = datetime.now().timestamp() - pre_log.stat().st_mtime
+        print("------------- generation 2: pre-training -------------")
+        print(f"log:          {pre_log.name}  (updated {_fmt_age(pre_log.stat().st_mtime)})  "
+              f"→ {'RUNNING' if age < 600 else 'STOPPED'}")
+        if steps:
+            print(f"  {steps[-1].split('pretrain', 1)[-1].strip()}")
+        for v in vals[-3:]:
+            print(f"  {v.split('[val] ', 1)[-1]}")
+        if any("pre-training complete" in l for l in text):
+            print("  COMPLETE")
+
     sup = logs / "supervisor.log"
     if sup.exists():
         lines = sup.read_text(encoding="utf-8", errors="replace").splitlines()
-        starts = sum(1 for l in lines if "starting training" in l)
+        starts = sum(1 for l in lines if "starting training" in l or "starting job" in l)
         deaths = sum(1 for l in lines if "died" in l)
         print("-------------------------------------------------")
         print(f"supervisor:   {starts} starts, {deaths} restarts after death")

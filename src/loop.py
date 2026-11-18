@@ -169,6 +169,9 @@ def train_step(net, opt, batch, device) -> tuple[float, float, float]:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hours", type=float, default=0, help="stop after this long (0 = until logs/STOP)")
+    ap.add_argument("--max-steps", type=int, default=0,
+                    help="stop for good at this training step: saves, then leaves logs/STOP so "
+                         "logon launches stay off (0 = no limit)")
     ap.add_argument("--workers", type=int, default=6, help="self-play processes")
     ap.add_argument("--parallel", type=int, default=160, help="concurrent games per self-play worker")
     ap.add_argument("--gen-sims", type=int, default=100, help="MCTS visits per self-play move")
@@ -360,6 +363,11 @@ def main():
                 break
             if args.hours and now - t_start > args.hours * 3600:
                 reason = f"--hours {args.hours} reached"
+                break
+            if args.max_steps and state["step"] >= args.max_steps and not arena_busy:
+                reason = f"--max-steps {args.max_steps} reached (run finished; logs/STOP left in place)"
+                stop_file.parent.mkdir(exist_ok=True)
+                stop_file.touch()
                 break
 
             # Keep workers alive.
