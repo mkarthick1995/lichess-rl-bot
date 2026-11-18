@@ -107,6 +107,15 @@ def test_engine_plays_legal_moves_and_reuses_tree():
         eng.close()
 
 
+def test_engine_plays_mate_in_one_instantly():
+    # Scholar's mate available: Qxf7#
+    b = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
+    eng = BulletEngine(uniform_eval, BulletConfig(ponder=False))
+    info = eng.choose(b, Clock(60_000, 60_000))
+    assert info.move.uci() == "h5f7" and info.mode == "mate"
+    eng.close()
+
+
 def test_engine_instant_move_in_panic():
     eng = BulletEngine(uniform_eval, BulletConfig(ponder=False))
     b = chess.Board()

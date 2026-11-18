@@ -114,6 +114,19 @@ def allows_mate_in_one(board: chess.Board, move: chess.Move) -> bool:
         board.pop()
 
 
+def find_mate_in_one(board: chess.Board) -> Optional[chess.Move]:
+    """A move that checkmates right now, if any. The value head only says
+    *that* we win, not how fast, so a short search happily shuffles in a won
+    position while the clock runs down; this check costs a few ms."""
+    for move in board.legal_moves:
+        board.push(move)
+        mate = board.is_checkmate()
+        board.pop()
+        if mate:
+            return move
+    return None
+
+
 def _draw_after(board: chess.Board, move: chess.Move) -> bool:
     """Would this move end the game in a draw (stalemate, dead position,
     threefold — Lichess draws a threefold automatically)?"""
@@ -244,6 +257,12 @@ class BulletEngine:
         legal = list(board.legal_moves)
         if not legal:
             raise ValueError("no legal moves")
+
+        mate = find_mate_in_one(board)
+        if mate is not None:
+            self._set_root(None, None)
+            return MoveInfo(move=mate, mode="mate", think_ms=0,
+                            spent_ms=(time.monotonic() - t0) * 1000.0, sims=0, value=1.0)
 
         root = self._reuse(board)
         reused = root.visit_count
