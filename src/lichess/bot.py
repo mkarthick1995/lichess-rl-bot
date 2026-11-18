@@ -42,6 +42,7 @@ from .bot_api import LichessAPI, load_token
 log = logging.getLogger("lichess.bot")
 
 PAUSE_FILE = Path("logs") / "PAUSE"
+STOP_BOT = Path("logs") / "STOP_BOT"      # run_bot.ps1's stop file: exit once idle
 PGN_FILE = Path("logs") / "bot-games.pgn"
 
 
@@ -482,6 +483,9 @@ def main():
         idle_since = time.monotonic()
         while True:
             time.sleep(1.0)
+            if STOP_BOT.exists() and not bot.busy():
+                log.info(f"{STOP_BOT} found; stopping (no game in progress)")
+                return
             if bot.busy():
                 idle_since = time.monotonic()
                 continue

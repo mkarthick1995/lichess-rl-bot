@@ -152,6 +152,14 @@ play UltraBullet). It plays through the official
 way to run an engine against people: the account is marked BOT, so opponents
 know what they are playing.
 
+**Always-on service** (`run_bot.ps1`): keeps the bot online. It accepts
+bullet challenges and never sends any. It restarts after crashes or network
+outages, with back-off. The scheduled task "lichess-rl-bot bot" and the
+Startup shortcut "lichess-rl-bot bot.lnk" start it at logon. To stop it:
+`New-Item logs\STOP_BOT`; the bot finishes the current game, then exits and
+stays off across reboots. Start it again with `.\run_bot.ps1`, which clears
+the stop file. Log: `logs\bot-supervisor.log`, `logs\bot-*.log`.
+
 **Clock-aware play** (`src/bullet.py`): the search is time-limited, not
 simulation-limited. A time manager budgets each move from the clock (fast
 opening, ~1/40 of the clock when low), plays instant policy-only moves below
