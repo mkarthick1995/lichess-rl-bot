@@ -50,8 +50,14 @@ $jobs = @{
         "--epochs", "2", "--batch-size", "1024",
         "--finish-stop"
     )
+    # Generation 2, stage 2: Gumbel self-play RL from the pre-trained network,
+    # gated twice (fixed-sims arena for self-play; clocked 1+0 for the bot).
+    "selfplay-v2" = @(
+        "-m", "src.loop2",
+        "--workers", "6", "--parallel", "128"
+    )
 }
-$job = "pretrain-v2"
+$job = "selfplay-v2"
 $loopArgs = $jobs[$job]
 
 function Log-Super($msg) {

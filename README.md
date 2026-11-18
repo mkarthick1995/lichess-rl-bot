@@ -64,8 +64,7 @@ Training runs under a supervisor that restarts it if it dies. The loop resumes
 on its own from `checkpoints/state.json`, `checkpoints/latest.pt` and `games/`:
 
 ```powershell
-Start-Process powershell -ArgumentList "-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",".
-un_training.ps1"
+Start-Process powershell -ArgumentList "-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",".\run_training.ps1"
 ```
 
 A scheduled task, **"lichess-rl-bot training"**, starts the same script at
@@ -81,8 +80,8 @@ time (named mutex). While training runs, the loop keeps Windows from sleeping.
   exists. Run the script by hand to resume (that clears `STOP`).
 - **Remove the logon task:** `Unregister-ScheduledTask -TaskName "lichess-rl-bot training"`.
 
-Outputs: `checkpointsest.pt` is always the newest promoted net (what the
-Lichess tools use). `checkpoints\genest_NNNNN.pt` keeps the promotion
+Outputs: `checkpoints\best.pt` is always the newest promoted net (what the
+Lichess tools use). `checkpoints\gen\best_NNNNN.pt` keeps the promotion
 history: the last 10, plus every 10th.
 
 Tunable knobs (`python -m src.loop --help`): `--workers`/`--parallel` (CPU
@@ -103,6 +102,33 @@ python -m src.evaluate --a checkpoints/best.pt --stockfish-level 3        # vs l
 `tools\stockfish\stockfish.exe` (official build, not in git; download
 `stockfish-windows-x86-64-avx2.zip` from the Stockfish GitHub releases and
 rename the exe).
+
+### Generation 2: self-play RL (`src.loop2`, job `selfplay-v2`)
+
+Starts from the pre-trained clock-aware network (`checkpoints\v2\pretrain_best.pt`):
+
+- **Self-play** uses Gumbel root search (Danihelka et al. 2022): sequential
+  halving over the top moves, and the *improved policy* as the policy target,
+  which learns well at low simulation counts. It also uses **playout-cap
+  randomisation** (KataGo): 25% of moves get a full 128-simulation search and
+  are recorded; the rest get a fast 24-simulation search and are not. Each
+  recorded position has three targets: improved policy, game result and
+  moves-left. Self-play runs without clocks, and games are never resigned.
+- **Training** mixes 75% self-play positions with 25% strong human bullet
+  positions that include clocks. The network gets stronger at chess without
+  forgetting what the clocks mean, including losses on time.
+- **Gate 1:** each candidate plays the current best in 160 games at a fixed 64
+  simulations. A score of at least 0.55 makes it the new best, which
+  self-play then uses.
+- **Gate 2:** at most every 8 h, the newest best plays the bot's current
+  network in 40 real clocked 1+0 games, while self-play and training hold. A
+  score of at least 0.55 copies it to `checkpoints\v2\bot.pt`.
+  `src.lichess.bot` plays with that file by default and reloads it between
+  games.
+
+Status: `python -m src.status` (section "generation 2: self-play RL"). Files:
+`checkpoints\v2\rl\` (state, latest, `gen\best_NNNNN.pt`, `history.jsonl`) and
+`games2\` (the replay buffer).
 
 ## Tests
 

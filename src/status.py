@@ -104,6 +104,37 @@ def main():
         if any("pre-training complete" in l for l in text):
             print("  COMPLETE")
 
+    rl_dir = ckpt / "v2" / "rl"
+    rl_log = _latest("loop2-*.log", logs) if logs.exists() else None
+    if (rl_dir / "state.json").exists() or rl_log:
+        print("------------- generation 2: self-play RL -------------")
+        if rl_log:
+            age = datetime.now().timestamp() - rl_log.stat().st_mtime
+            print(f"log:          {rl_log.name}  (updated {_fmt_age(rl_log.stat().st_mtime)})  "
+                  f"→ {'RUNNING' if age < 600 else 'STOPPED'}")
+        if (rl_dir / "state.json").exists():
+            s = json.loads((rl_dir / "state.json").read_text())
+            print(f"started:      {s.get('created')}   best v{s['version']} ({s['promotions']} promotions)"
+                  f"   bot plays: {s.get('bot')}")
+            print(f"progress:     step {s['step']:,}, {s['games']:,} games, {s['positions']:,} positions")
+        if rl_log:
+            text = rl_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            stats = [l for l in text if "[stats]" in l]
+            if stats:
+                for part in stats[-1].split("[stats] ", 1)[1].split(" | "):
+                    print(f"  {part}")
+            held = [l for l in text if "[bullet] gating" in l or "[bullet] best" in l]
+            if held and "gating" in held[-1]:
+                print("  bullet gate in progress (self-play holds)")
+        if (rl_dir / "history.jsonl").exists():
+            ev = [json.loads(l) for l in (rl_dir / "history.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+            for e in ev[-6:]:
+                w, d, l = e["wdl"]
+                what = (f"step {e['step']:>7} vs best v{e['best']}" if e["kind"] == "match"
+                        else f"BULLET v{e['best']} vs bot ({e['bot']})")
+                print(f"  {e['time']}  {what}: {w}W-{d}D-{l}L  {e['score']:.2f}  "
+                      f"{'PROMOTED' if e['promoted'] else ''}")
+
     sup = logs / "supervisor.log"
     if sup.exists():
         lines = sup.read_text(encoding="utf-8", errors="replace").splitlines()

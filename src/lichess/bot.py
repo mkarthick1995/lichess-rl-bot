@@ -390,7 +390,10 @@ def _parse_tc(tc: str) -> tuple[int, int]:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", default="checkpoints/best.pt")
+    ap.add_argument("--checkpoint", default=None,
+                    help="network to play with (default: checkpoints/v2/bot.pt, the network that "
+                         "passed the latest bullet gate, else checkpoints/best.pt); reloaded "
+                         "between games when the file changes")
     ap.add_argument("--token-file", default=".lichess-token")
     ap.add_argument("--channels", type=int, default=128)
     ap.add_argument("--blocks", type=int, default=10)
@@ -433,12 +436,29 @@ def main():
 
     torch.backends.cudnn.benchmark = True
     dev = torch.device(args.device)
-    evaluator = make_evaluator(args.checkpoint, dev, args.channels, args.blocks)
-    log.info(f"network: {args.checkpoint} ({type(evaluator).__name__})")
+    ckpt = Path(args.checkpoint or ("checkpoints/v2/bot.pt" if Path("checkpoints/v2/bot.pt").exists()
+                                    else "checkpoints/best.pt"))
     cfg = BulletConfig(overhead_ms=args.overhead_ms)
-    make_engine = lambda: BulletEngine(evaluator, cfg)
-    # warm up cuDNN so the first move isn't slow
-    BulletEngine(evaluator, BulletConfig(ponder=False)).choose(chess.Board(), Clock(60_000, 60_000))
+    net = {"mtime": None, "ev": None}
+
+    def make_engine():
+        """New engine per game; picks up a newly gated network between games."""
+        try:
+            mtime = ckpt.stat().st_mtime
+            if mtime != net["mtime"]:
+                ev = make_evaluator(ckpt, dev, args.channels, args.blocks)
+                # warm up cuDNN so the first move isn't slow
+                BulletEngine(ev, BulletConfig(ponder=False)).choose(chess.Board(), Clock(60_000, 60_000))
+                net.update(mtime=mtime, ev=ev)
+                log.info(f"network: {ckpt} ({type(ev).__name__}, modified "
+                         f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))})")
+        except Exception as e:                  # mid-copy or unreadable: keep the current one
+            if net["ev"] is None:
+                raise
+            log.warning(f"could not reload {ckpt} ({e}); keeping the current network")
+        return BulletEngine(net["ev"], cfg)
+
+    make_engine().close()
 
     policy = ChallengePolicy(allow_humans=not args.no_humans, allow_bots=not args.no_bots)
     bot = Bot(api, my_id, make_engine, policy, pause_training=not args.no_pause_training)

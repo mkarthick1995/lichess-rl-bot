@@ -26,6 +26,7 @@ Thumbs.db
 # Training artefacts (large, not for source control)
 checkpoints/
 games/
+games2/
 runs/
 logs/
 *.pt

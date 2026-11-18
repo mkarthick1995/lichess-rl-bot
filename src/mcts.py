@@ -127,16 +127,21 @@ def _revert_virtual_loss(path: list, vl: float) -> None:
 
 
 def gather_leaf(root: Node, board: chess.Board, c_puct: float = 1.5,
-                fpu_reduction: float = 0.2, vl: float = 0.0):
+                fpu_reduction: float = 0.2, vl: float = 0.0,
+                root_action: Optional[int] = None):
     """Walk from `root` (whose position is `board`) to a leaf.
 
     Returns a Pending to evaluate, DONE (terminal leaf, backed up) or
     COLLISION. `board` is mutated during the walk and restored before return.
     With vl > 0, virtual loss is applied along the path so further calls pick
-    different leaves before the batch is evaluated."""
+    different leaves before the batch is evaluated. `root_action` forces the
+    first edge (Gumbel root search); below it selection is PUCT as usual."""
     node, path = root, []
     while node.moves is not None and node.terminal is None:
-        i = _select(node, c_puct, fpu_reduction)
+        if root_action is not None and node is root:
+            i = root_action
+        else:
+            i = _select(node, c_puct, fpu_reduction)
         path.append((node, i))
         if vl:
             node.N[i] += vl
