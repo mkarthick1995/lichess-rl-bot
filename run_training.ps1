@@ -9,7 +9,9 @@
 #          supervisor again deletes logs/STOP.)
 #
 # Only one supervisor can run at a time (named mutex), so it is safe to start
-# from a logon task and by hand. With -AtLogon (used by the scheduled task)
+# from a logon task and by hand. It is launched at logon by BOTH a scheduled
+# task and a Startup-folder shortcut (the task alone was sometimes skipped by
+# Task Scheduler); whichever starts second just logs and exits. With -AtLogon
 # an existing logs/STOP is respected instead of cleared, so a deliberate stop
 # survives reboots.
 
@@ -17,6 +19,7 @@ param([switch]$AtLogon)
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+try { [Console]::TreatControlCAsInput = $true } catch { }   # no console when hidden: fine
 
 $py        = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 $superLog  = Join-Path $PSScriptRoot "logs\supervisor.log"
@@ -31,7 +34,7 @@ $loopArgs = @(
     "--eval-sims", "100",
     "--batch-size", "512",
     "--sample-ratio", "4",
-    "--eval-every", "3000", "--eval-games", "160",
+    "--eval-every", "6000", "--eval-games", "160",
     "--promote-threshold", "0.55",
     "--channels", "128",
     "--blocks", "10",
@@ -76,8 +79,11 @@ while ($true) {
     # native program's stderr turns each line into an error record, which with
     # ErrorActionPreference=Stop can kill this supervisor — and the child with
     # it. Per-attempt files keep any crash traceback (faulthandler) around.
+    # -WindowStyle Hidden (not -NoNewWindow) gives the trainer its own hidden
+    # console: twice a stray Ctrl+C/close event on this supervisor's console
+    # killed trainer + supervisor together a few minutes after logon.
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $proc = Start-Process -FilePath $py -ArgumentList $loopArgs -NoNewWindow -Wait -PassThru `
+    $proc = Start-Process -FilePath $py -ArgumentList $loopArgs -WindowStyle Hidden -Wait -PassThru `
         -WorkingDirectory $PSScriptRoot `
         -RedirectStandardOutput (Join-Path $PSScriptRoot "logs\training-run-$stamp.out") `
         -RedirectStandardError  (Join-Path $PSScriptRoot "logs\training-run-$stamp.err")

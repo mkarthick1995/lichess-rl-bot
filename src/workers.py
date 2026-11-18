@@ -13,7 +13,9 @@ search run on several cores in parallel.
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import queue
+import signal
 import time
 import traceback
 from pathlib import Path
@@ -27,6 +29,37 @@ from .self_play import SearchConfig, load_net, run_selfplay
 
 def best_path(ckpt_dir: str | Path, version: int) -> Path:
     return Path(ckpt_dir) / "gen" / f"best_{version:05d}.pt"
+
+
+def _detach_from_console() -> None:
+    """Workers are stopped by the trainer (stop_evt / terminate), never by
+    console signals: a stray Ctrl+C / Ctrl+Break sent to the console would
+    otherwise kill every worker at once."""
+    for name in ("SIGINT", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, signal.SIG_IGN)
+            except (OSError, ValueError):
+                pass
+
+
+def _parent_watch(every: float = 5.0):
+    """Returns a cheap callable that is True once the trainer process has
+    died, so an orphaned worker exits instead of playing games nobody saves."""
+    parent = mp.parent_process()
+    state = {"t": 0.0, "dead": False}
+
+    def dead() -> bool:
+        if parent is None or state["dead"]:
+            return state["dead"]
+        now = time.monotonic()
+        if now - state["t"] >= every:
+            state["t"] = now
+            state["dead"] = not parent.is_alive()
+        return state["dead"]
+
+    return dead
 
 
 def _load_into(net, path: Path, device, log) -> bool:
@@ -44,6 +77,8 @@ def _load_into(net, path: Path, device, log) -> bool:
 def selfplay_worker(wid: int, cfg: dict, version, out_q, stop_evt) -> None:
     log = logging.getLogger(f"worker.sp{wid}")
     setup_logging(f"worker-sp{wid}", cfg["log_level"])
+    _detach_from_console()
+    parent_dead = _parent_watch()
     try:
         torch.set_num_threads(1)
         torch.backends.cudnn.benchmark = True
@@ -77,7 +112,11 @@ def selfplay_worker(wid: int, cfg: dict, version, out_q, stop_evt) -> None:
 
         run_selfplay(ev, search, 0, cfg["parallel"], on_game,
                      temp_plies=cfg["temp_plies"], max_plies=cfg["max_plies"],
-                     should_stop=stop_evt.is_set, between_steps=maybe_reload)
+                     should_stop=lambda: stop_evt.is_set() or parent_dead(),
+                     between_steps=maybe_reload)
+        if parent_dead():
+            log.warning("trainer process is gone; exiting")
+            out_q.cancel_join_thread()      # nobody will read the queue
     except Exception:
         log.error("self-play worker crashed:\n" + traceback.format_exc())
         raise
@@ -88,12 +127,17 @@ def arena_worker(cfg: dict, task_q, result_q, stop_evt) -> None:
 
     log = logging.getLogger("worker.arena")
     setup_logging("worker-arena", cfg["log_level"])
+    _detach_from_console()
+    parent_dead = _parent_watch(every=0.0)
     torch.set_num_threads(1)
     torch.backends.cudnn.benchmark = True
     device = torch.device(cfg["device"])
     search = SearchConfig(n_sims=cfg["eval_sims"], c_puct=cfg["c_puct"])
 
     while not stop_evt.is_set():
+        if parent_dead():
+            log.warning("trainer process is gone; exiting")
+            return
         try:
             task = task_q.get(timeout=1.0)
         except queue.Empty:

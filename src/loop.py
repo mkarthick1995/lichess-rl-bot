@@ -33,6 +33,7 @@ import multiprocessing as mp
 import os
 import queue
 import shutil
+import signal
 import sys
 import time
 from collections import Counter, deque
@@ -204,6 +205,10 @@ def main():
     if log_path:
         log.info(f"log file: {log_path}")
     _keep_awake()
+    # Ctrl+Break would kill the trainer without saving; ignore it. Ctrl+C still
+    # raises KeyboardInterrupt, which saves and exits cleanly (see below).
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 
     device = torch.device(args.device)
     log.info(f"device = {device}  cuda_available={torch.cuda.is_available()}")
