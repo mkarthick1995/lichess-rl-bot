@@ -18,6 +18,7 @@ by the Lichess wiring.
 from __future__ import annotations
 
 import math
+import time
 from typing import Callable, NamedTuple, Optional
 
 import numpy as np
@@ -203,10 +204,16 @@ Evaluator = Callable[[list, list], tuple[list, np.ndarray]]
 
 def search(root: Node, board: chess.Board, evaluate: Evaluator, n_simulations: int,
            c_puct: float = 1.5, fpu_reduction: float = 0.2, leaf_batch: int = 16,
-           on_root_expanded: Optional[Callable[[Node], None]] = None) -> Node:
+           on_root_expanded: Optional[Callable[[Node], None]] = None,
+           deadline: Optional[float] = None,
+           should_stop: Optional[Callable[[], bool]] = None) -> Node:
     """Run simulations on one tree until root has `n_simulations` visits
     beyond its own expansion, batching up to `leaf_batch` leaves per network
-    call via virtual loss."""
+    call via virtual loss.
+
+    `deadline` (a time.monotonic() value) and `should_stop` end the search
+    early; both are checked between batches, so it overruns by at most one
+    network call. The root is always expanded, so a move is always available."""
     vl = 1.0 if leaf_batch > 1 else 0.0
     if not root.expanded:
         p = gather_leaf(root, board, c_puct, fpu_reduction)
@@ -227,6 +234,10 @@ def search(root: Node, board: chess.Board, evaluate: Evaluator, n_simulations: i
         return root
 
     while root.n - 1 < n_simulations:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        if should_stop is not None and should_stop():
+            break
         want = min(leaf_batch, int(n_simulations - (root.n - 1)))
         batch = []
         for _ in range(want):

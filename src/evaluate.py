@@ -29,11 +29,14 @@ def elo_gap(score: float) -> float:
     return -400 * math.log10(1 / score - 1)
 
 
-def _run(runner: GameRunner, specs: list[GameSpec], parallel: int, on_game=None) -> tuple[int, int, int]:
+def _run(runner: GameRunner, specs: list[GameSpec], parallel: int, on_game=None,
+         between_steps=None) -> tuple[int, int, int]:
     """Play specs (tag = True when A has white); returns A's (W, D, L)."""
     w = d = l = 0
     queue = list(specs)
     while queue or runner.games:
+        if between_steps is not None:
+            between_steps()
         while queue and len(runner.games) < parallel:
             runner.add(queue.pop())
         for rec in runner.step():
@@ -48,7 +51,8 @@ def _run(runner: GameRunner, specs: list[GameSpec], parallel: int, on_game=None)
 
 
 def play_match(ev_a, ev_b, n_games: int, cfg: SearchConfig, parallel: int = 64,
-               opening_plies: int = 6, max_plies: int = 512, on_game=None) -> tuple[int, int, int]:
+               opening_plies: int = 6, max_plies: int = 512, on_game=None,
+               between_steps=None) -> tuple[int, int, int]:
     """A vs B, colours alternating. The first `opening_plies` plies are
     sampled ∝ visit counts so games differ (otherwise every game with the
     same colours would be identical)."""
@@ -59,7 +63,7 @@ def play_match(ev_a, ev_b, n_games: int, cfg: SearchConfig, parallel: int = 64,
                                        chess.BLACK: "b" if a_white else "a"},
                               add_noise=False, temp_plies=opening_plies,
                               record=False, max_plies=max_plies, tag=a_white))
-    return _run(GameRunner({"a": ev_a, "b": ev_b}, cfg), specs, parallel, on_game)
+    return _run(GameRunner({"a": ev_a, "b": ev_b}, cfg), specs, parallel, on_game, between_steps)
 
 
 class StockfishPlayer:
@@ -81,7 +85,7 @@ class StockfishPlayer:
 
 
 def play_stockfish(ev, level: int, n_games: int, cfg: SearchConfig, parallel: int = 32,
-                   opening_plies: int = 4, on_game=None) -> tuple[int, int, int]:
+                   opening_plies: int = 4, on_game=None, between_steps=None) -> tuple[int, int, int]:
     """Net (A) vs Stockfish skill `level`; returns the net's (W, D, L)."""
     sf = StockfishPlayer(level)
     try:
@@ -92,7 +96,7 @@ def play_stockfish(ev, level: int, n_games: int, cfg: SearchConfig, parallel: in
                                            chess.BLACK: sf if a_white else "a"},
                                   add_noise=False, temp_plies=opening_plies,
                                   record=False, tag=a_white))
-        return _run(GameRunner({"a": ev}, cfg), specs, parallel, on_game)
+        return _run(GameRunner({"a": ev}, cfg), specs, parallel, on_game, between_steps)
     finally:
         sf.close()
 

@@ -53,7 +53,7 @@ from ._log import setup_logging
 from .evaluate import elo_gap
 from .network import ChessNet
 from .replay_buffer import ReplayBuffer
-from .workers import arena_worker, best_path, selfplay_worker
+from .workers import arena_worker, best_path, selfplay_worker, training_paused
 
 log = logging.getLogger("loop")
 
@@ -281,6 +281,7 @@ def main():
     t_start = time.monotonic()
     pending_recs: list[dict] = []
     t_flush = t_stats = t_refresh = time.monotonic()
+    t_pause_check, paused = 0.0, False
     arena_busy = False
     window = {"games": 0, "plies": 0, "sims": 0, "steps": 0,
               "pl": 0.0, "vl": 0.0, "gn": 0.0, "outcomes": Counter()}
@@ -402,6 +403,17 @@ def main():
                 handle_result(result_q.get_nowait())
             except queue.Empty:
                 pass
+            # A Lichess bot game is running: leave the GPU to it (the workers
+            # pause themselves too). Checked once a second.
+            if now - t_pause_check >= 1.0:
+                was_paused, paused = paused, training_paused()
+                t_pause_check = now
+                if paused != was_paused:
+                    log.info("paused: bot game in progress (logs/PAUSE)" if paused else "resumed")
+            if paused:
+                time.sleep(0.25)
+                continue
+
             if (not arena_busy and buffer.size >= args.min_buffer
                     and state["step"] - state["last_snapshot_step"] >= args.eval_every):
                 snap = ckpt_dir / "gen" / f"cand_{state['step']:08d}.pt"

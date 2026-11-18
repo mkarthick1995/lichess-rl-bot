@@ -62,6 +62,39 @@ def _parent_watch(every: float = 5.0):
     return dead
 
 
+PAUSE_FILE = Path("logs") / "PAUSE"
+PAUSE_MAX_AGE = 600.0      # a PAUSE file not touched for this long is stale
+
+
+def training_paused() -> bool:
+    """True while the Lichess bot is playing (it creates logs/PAUSE and
+    touches it every move). A stale file — e.g. the bot crashed — is ignored."""
+    try:
+        return time.time() - PAUSE_FILE.stat().st_mtime < PAUSE_MAX_AGE
+    except OSError:
+        return False
+
+
+def _pause_waiter(stop_evt, parent_dead, log, every: float = 1.0):
+    """Callable that blocks while training is paused (checked at most every
+    `every` seconds, so the per-step cost is negligible)."""
+    state = {"t": 0.0}
+
+    def wait() -> None:
+        now = time.monotonic()
+        if now - state["t"] < every:
+            return
+        state["t"] = now
+        if not training_paused():
+            return
+        log.info("paused (logs/PAUSE: bot game in progress)")
+        while training_paused() and not stop_evt.is_set() and not parent_dead():
+            time.sleep(0.5)
+        log.info("resumed")
+
+    return wait
+
+
 def _load_into(net, path: Path, device, log) -> bool:
     for attempt in range(10):
         try:
@@ -96,6 +129,12 @@ def selfplay_worker(wid: int, cfg: dict, version, out_q, stop_evt) -> None:
                     state["version"] = v
 
         maybe_reload()
+        pause_wait = _pause_waiter(stop_evt, parent_dead, log)
+
+        def between_steps():
+            pause_wait()
+            maybe_reload()
+
         search = SearchConfig(n_sims=cfg["gen_sims"], c_puct=cfg["c_puct"])
         t_last, n_games = time.monotonic(), 0
 
@@ -113,7 +152,7 @@ def selfplay_worker(wid: int, cfg: dict, version, out_q, stop_evt) -> None:
         run_selfplay(ev, search, 0, cfg["parallel"], on_game,
                      temp_plies=cfg["temp_plies"], max_plies=cfg["max_plies"],
                      should_stop=lambda: stop_evt.is_set() or parent_dead(),
-                     between_steps=maybe_reload)
+                     between_steps=between_steps)
         if parent_dead():
             log.warning("trainer process is gone; exiting")
             out_q.cancel_join_thread()      # nobody will read the queue
@@ -133,11 +172,13 @@ def arena_worker(cfg: dict, task_q, result_q, stop_evt) -> None:
     torch.backends.cudnn.benchmark = True
     device = torch.device(cfg["device"])
     search = SearchConfig(n_sims=cfg["eval_sims"], c_puct=cfg["c_puct"])
+    pause_wait = _pause_waiter(stop_evt, parent_dead, log)
 
     while not stop_evt.is_set():
         if parent_dead():
             log.warning("trainer process is gone; exiting")
             return
+        pause_wait()
         try:
             task = task_q.get(timeout=1.0)
         except queue.Empty:
@@ -148,9 +189,10 @@ def arena_worker(cfg: dict, task_q, result_q, stop_evt) -> None:
             if task["kind"] == "match":
                 ev_b = BatchEvaluator(load_net(task["b"], cfg["channels"], cfg["blocks"], device), device)
                 wdl = play_match(ev_a, ev_b, task["n_games"], search, parallel=task["n_games"],
-                                 max_plies=cfg.get("arena_max_plies", 512))
+                                 max_plies=cfg.get("arena_max_plies", 512), between_steps=pause_wait)
             else:
-                wdl = play_stockfish(ev_a, task["level"], task["n_games"], search, parallel=32)
+                wdl = play_stockfish(ev_a, task["level"], task["n_games"], search, parallel=32,
+                                     between_steps=pause_wait)
             result_q.put({**task, "wdl": wdl, "seconds": time.monotonic() - t0})
             log.info(f"task {task['kind']} done: {wdl} in {time.monotonic() - t0:.0f}s")
         except Exception:

@@ -41,3 +41,6 @@ test-results/
 # Archived runs and local tools (Stockfish binary for evaluation)
 archive/
 tools/
+
+# Lichess API token (never commit)
+.lichess-token
